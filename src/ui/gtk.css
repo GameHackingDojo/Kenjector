@@ -1,0 +1,40 @@
+.app_toast_box {
+  background: #aa3a45cc;
+  /* margin-left: auto; */
+  margin-bottom: 20px;
+  /* color: white; */
+  border-radius: 8px;
+  padding: 20px 20px; /* Combine padding-left/right */
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+
+  max-height: 30px;
+
+  /* GTK4-specific centering */
+  margin-top: 40px;
+  /* margin-bottom: 0; */
+  -gtk-halign: center; /* Horizontal alignment */
+}
+
+/* .progressbar {
+  background-color: peachpuff;
+  background: peachpuff;
+  color: peachpuff;
+  background-color: peachpuff;
+} */
+
+/* progressbar trough {
+  background-color: #222;
+} */
+
+progressbar.progress_bar trough progress {
+  background-color: #666666;
+}
+
+/* progressbar:disabled trough progress {
+  background-color: #888;
+} */
+
+/* .button {
+  background: #cc3a45ff;
+  color: red;
+} */

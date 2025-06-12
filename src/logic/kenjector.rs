@@ -1,0 +1,460 @@
+use derive_more::Display;
+use pelite::{FileMap, pe32::{Pe as Pe32, PeFile as Pe32File}, pe64::{Pe as Pe64, PeFile as Pe64File}};
+use std::ffi::CString;
+use std::{ffi::CStr, mem::zeroed, path::PathBuf, ptr::{self, null_mut}};
+use winapi::{shared::windef::{HBITMAP, HICON}, um::{handleapi::CloseHandle, libloaderapi::{GetModuleHandleA, GetProcAddress}, memoryapi::{VirtualAllocEx, WriteProcessMemory}, processthreadsapi::{CreateRemoteThread, GetExitCodeThread, OpenProcess, OpenProcessToken}, psapi::GetModuleFileNameExW, securitybaseapi::GetTokenInformation, shellapi::ExtractIconExW, synchapi::WaitForSingleObject, tlhelp32::{CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS}, winbase::INFINITE, wingdi::{BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDIBits}, winnt::{HANDLE, IMAGE_FILE_MACHINE_I386, MEM_COMMIT, PAGE_READWRITE, PROCESS_ALL_ACCESS, PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation}, winuser::{GetIconInfo, ICONINFO}, wow64apiset::IsWow64Process2}};
+
+#[derive(Debug, Clone, Display)]
+#[display("{} - {:#X}", name, process_id)]
+pub struct ProcessBasicInfo {
+  pub icon: Option<gtk4::gdk::Paintable>,
+  pub elevated: bool,
+  pub name: String,
+  pub arch: Arch,
+  pub process_id: u32,
+}
+
+#[derive(Debug, Default)]
+struct VersionInfo {
+  product_version: String,
+  legal_copyright: String,
+  original_filename: String,
+  file_description: String,
+  internal_name: String,
+  company_name: String,
+  file_version: String,
+  product_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
+pub enum Arch {
+  AMDx64,
+  AMDx86,
+  Arm64,
+  Unknown,
+}
+
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
+pub enum Access {
+  All = PROCESS_ALL_ACCESS,
+  Limited = PROCESS_QUERY_LIMITED_INFORMATION,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct Kenjector {}
+impl Kenjector {
+  fn get_pid(name: &str) -> Result<u32, String> {
+    unsafe {
+      let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+      if snapshot == null_mut() {
+        return Err("CreateToolhelp32Snapshot failed".to_string());
+      }
+
+      let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+      entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+
+      if Process32First(snapshot, &mut entry) == 0 {
+        CloseHandle(snapshot);
+        return Err("Process32First failed".to_string());
+      }
+
+      loop {
+        let exe_name_cstr = CStr::from_ptr(entry.szExeFile.as_ptr());
+        if let Ok(exe_name) = exe_name_cstr.to_str() {
+          if exe_name.eq_ignore_ascii_case(name) {
+            CloseHandle(snapshot);
+            return Ok(entry.th32ProcessID);
+          }
+        }
+
+        if Process32Next(snapshot, &mut entry) == 0 {
+          break;
+        }
+      }
+
+      CloseHandle(snapshot);
+      Err("Process not found".to_string())
+    }
+  }
+
+  pub fn inject(&self, process_id: u32, path: PathBuf) -> Result<String, String> {
+    // let process_id = get_pid(process_name).map_err(|e| format!("Failed to get PID: {}", e))?;
+    let dll_str = path.to_str().ok_or("Invalid DLL path")?;
+    let dll_cstring = CString::new(dll_str).map_err(|_| "CString conversion failed")?;
+    println!("DLL path being injected: {:?}", dll_cstring);
+
+    unsafe {
+      let h_process = OpenProcess(PROCESS_ALL_ACCESS, 0, process_id);
+      if h_process.is_null() {
+        return Err("OpenProcess failed".to_string());
+      }
+
+      let alloc = VirtualAllocEx(h_process, null_mut(), dll_cstring.to_bytes_with_nul().len(), MEM_COMMIT, PAGE_READWRITE);
+
+      if alloc.is_null() {
+        CloseHandle(h_process);
+        return Err("VirtualAllocEx failed".to_string());
+      }
+
+      let wrote = WriteProcessMemory(h_process, alloc, dll_cstring.as_ptr() as _, dll_cstring.to_bytes_with_nul().len(), null_mut());
+
+      if wrote == 0 {
+        CloseHandle(h_process);
+        return Err("WriteProcessMemory failed".to_string());
+      }
+
+      let kernel32 = GetModuleHandleA(b"kernel32.dll\0".as_ptr() as _);
+      let load_library = GetProcAddress(kernel32, b"LoadLibraryA\0".as_ptr() as _);
+      if load_library.is_null() {
+        CloseHandle(h_process);
+        return Err("GetProcAddress failed".to_string());
+      }
+
+      let thread = CreateRemoteThread(h_process, null_mut(), 0, Some(std::mem::transmute(load_library)), alloc, 0, null_mut());
+
+      if thread.is_null() {
+        CloseHandle(h_process);
+        return Err("CreateRemoteThread failed".to_string());
+      }
+
+      WaitForSingleObject(thread, INFINITE);
+
+      let mut remote_result: u32 = 0;
+      let got = GetExitCodeThread(thread, &mut remote_result);
+
+      CloseHandle(thread);
+      CloseHandle(h_process);
+
+      if got == 0 {
+        Ok(format!("GetExitCodeThread failed."))
+      } else if remote_result == 0 {
+        Ok(format!("LoadLibraryA failed — did not load DLL."))
+      } else {
+        Ok(format!("DLL Kenjected successfully at 0x{:X}", remote_result))
+      }
+    }
+  }
+
+  pub fn new() -> Self { return Self {} }
+
+  pub fn open_process(&self, process_id: u32, access: Access) -> Result<HANDLE, Box<dyn std::error::Error>> {
+    let handle = unsafe { OpenProcess(access as u32, 0, process_id) };
+
+    if !handle.is_null() { Ok(handle) } else { Err(format!("Failed to retrieve handle of the process, process_id {}", process_id).into()) }
+  }
+
+  // Modify get_processes to return Vec<ProcessInfo>
+
+  pub fn get_processes(&self) -> Vec<ProcessBasicInfo> {
+    let mut processes: Vec<ProcessBasicInfo> = Vec::new();
+
+    unsafe {
+      // Create snapshot of all processes
+      let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+      if snapshot.is_null() {
+        eprintln!("Error creating process snapshot");
+        return processes;
+      }
+
+      let mut process_entry: PROCESSENTRY32 = std::mem::zeroed();
+      process_entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+
+      // Get first process
+      if Process32First(snapshot, &mut process_entry) == 0 {
+        eprintln!("Error getting first process");
+        return processes;
+      }
+
+      loop {
+        let process_id = process_entry.th32ProcessID;
+        let access = Access::Limited;
+        let mut arch = Arch::Unknown;
+        let mut elevated = true;
+
+        let process = self.open_process(process_id, access);
+
+        if process.is_ok() {
+          let process = process.unwrap();
+          elevated = match self.is_elevated(process) {
+            Ok(v) => v,
+            Err(_) => true,
+          };
+
+          arch = match self.architecture(process) {
+            Ok(v) => v,
+            Err(_) => Arch::Unknown,
+          };
+        }
+
+        let name = CStr::from_ptr(process_entry.szExeFile.as_ptr()).to_string_lossy().into_owned();
+
+        processes.push(ProcessBasicInfo { icon: self.get_process_icon(process_id), elevated, name, arch, process_id });
+
+        // Get next process
+        if Process32Next(snapshot, &mut process_entry) == 0 {
+          break;
+        }
+      }
+
+      // Close the snapshot handle
+      winapi::um::handleapi::CloseHandle(snapshot);
+    }
+
+    processes
+  }
+
+  pub fn is_elevated(&self, process: HANDLE) -> Result<bool, Box<dyn std::error::Error>> {
+    unsafe {
+      let mut token: HANDLE = null_mut();
+
+      if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+        return Err("Failed to open process token".into());
+      }
+
+      let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+      let mut size: u32 = 0;
+
+      let success = GetTokenInformation(token, TokenElevation, &mut elevation as *mut _ as *mut _, std::mem::size_of::<TOKEN_ELEVATION>() as u32, &mut size);
+
+      if success == 0 {
+        CloseHandle(token); // Don't forget to close the handle
+        return Err("Failed to get token information".into());
+      }
+
+      CloseHandle(token);
+      Ok(elevation.TokenIsElevated != 0)
+    }
+  }
+
+  pub fn architecture(&self, process: HANDLE) -> Result<Arch, Box<dyn std::error::Error>> {
+    let mut process_machine = 0;
+    let mut native_machine = 0;
+
+    unsafe {
+      if IsWow64Process2(process, &mut process_machine, &mut native_machine) == 0 {
+        return Err("IsWow64Process2 failed".into());
+      }
+    }
+
+    match (process_machine, native_machine) {
+      (IMAGE_FILE_MACHINE_UNKNOWN, IMAGE_FILE_MACHINE_AMD64) => Ok(Arch::AMDx64), // 64-bit native process
+      (IMAGE_FILE_MACHINE_I386, IMAGE_FILE_MACHINE_AMD64) => Ok(Arch::AMDx86),    // 32-bit on 64-bit
+      (IMAGE_FILE_MACHINE_I386, IMAGE_FILE_MACHINE_I386) => Ok(Arch::AMDx86),     // 32-bit on 32-bit
+      (IMAGE_FILE_MACHINE_UNKNOWN, IMAGE_FILE_MACHINE_ARM64) => Ok(Arch::Arm64),
+      _ => Ok(Arch::Unknown),
+    }
+  }
+
+  pub fn is_pe_dll(&self, path: &PathBuf) -> Result<bool, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let pe = goblin::pe::PE::parse(&bytes)?;
+    Ok(pe.header.coff_header.characteristics & goblin::pe::characteristic::IMAGE_FILE_DLL != 0)
+  }
+
+  // pub fn get_version_info(path: &PathBuf) -> Result<VersionInfo, Box<dyn std::error::Error>> {
+  //   let bytes = fs::read(path)?;
+  //   let pe = goblin::pe::PE::parse(&bytes)?;
+  //   let mut version_info = VersionInfo::default();
+
+  //   if let Some(resources) = pe.resources {
+  //     if let Some(version_info_resource) = resources.version_info {
+  //       let string_file_info = version_info_resource.string_file_info;
+
+  //       // Convert to a more convenient HashMap
+  //       let info_map: DashMap<&str, &str> = string_file_info.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+  //       version_info.product_version = info_map.get("ProductVersion").map(|s| s.to_string());
+  //       version_info.legal_copyright = info_map.get("LegalCopyright").map(|s| s.to_string());
+  //       version_info.original_filename = info_map.get("OriginalFilename").map(|s| s.to_string());
+  //       version_info.file_description = info_map.get("FileDescription").map(|s| s.to_string());
+  //       version_info.internal_name = info_map.get("InternalName").map(|s| s.to_string());
+  //       version_info.company_name = info_map.get("CompanyName").map(|s| s.to_string());
+  //       version_info.file_version = info_map.get("FileVersion").map(|s| s.to_string());
+  //       version_info.product_name = info_map.get("ProductName").map(|s| s.to_string());
+  //     }
+  //   }
+
+  //   Ok(version_info)
+  // }
+
+  fn get_pe_version_info(&self, path: PathBuf) -> Result<VersionInfo, String> {
+    // Load the file into memory
+    let file_map = FileMap::open(&path).expect(format!("Failed to open file map from {:?}", path).as_str());
+
+    // First, determine if the file is 64-bit or 32-bit
+    let is_x64 = if Pe64File::from_bytes(file_map.as_ref()).is_ok() { true } else { false };
+
+    let mut version_info = VersionInfo::default();
+
+    if is_x64 {
+      // Handle PE32+ (64-bit) file
+      let file_x64 = Pe64File::from_bytes(file_map.as_ref()).expect("Failed to parse PE64 file");
+      let resources_x64 = file_x64.resources().expect("Failed to retrieve resources from PE64 file");
+      let version_info_data_x64 = resources_x64.version_info().expect("Failed to retrieve version info data from resources");
+      let file_info_x64 = version_info_data_x64.file_info().strings;
+
+      // Fill the version_info struct based on available fields
+      for (_, strings_info_x64) in file_info_x64 {
+        version_info.product_version = strings_info_x64.get("ProductVersion").cloned().unwrap_or_default();
+        version_info.legal_copyright = strings_info_x64.get("LegalCopyright").cloned().unwrap_or_default();
+        version_info.original_filename = strings_info_x64.get("OriginalFilename").cloned().unwrap_or_default();
+        version_info.file_description = strings_info_x64.get("FileDescription").cloned().unwrap_or_default();
+        version_info.internal_name = strings_info_x64.get("InternalName").cloned().unwrap_or_default();
+        version_info.company_name = strings_info_x64.get("CompanyName").cloned().unwrap_or_default();
+        version_info.file_version = strings_info_x64.get("FileVersion").cloned().unwrap_or_default();
+        version_info.product_name = strings_info_x64.get("ProductName").cloned().unwrap_or_default();
+      }
+    } else {
+      // Handle PE32 (32-bit) file
+      let file_x86 = Pe32File::from_bytes(file_map.as_ref()).expect("Failed to parse PE32 file");
+      let resources_x86 = file_x86.resources().expect("Failed to retrieve resources from PE32 file");
+      let version_info_data_x86 = resources_x86.version_info().expect("Failed to retrieve version info data from resources");
+      let file_info_x86 = version_info_data_x86.file_info().strings;
+
+      // Fill the version_info struct based on available fields
+      for (_, strings_info_x86) in file_info_x86 {
+        version_info.product_version = strings_info_x86.get("ProductVersion").cloned().unwrap_or_default();
+        version_info.legal_copyright = strings_info_x86.get("LegalCopyright").cloned().unwrap_or_default();
+        version_info.original_filename = strings_info_x86.get("OriginalFilename").cloned().unwrap_or_default();
+        version_info.file_description = strings_info_x86.get("FileDescription").cloned().unwrap_or_default();
+        version_info.internal_name = strings_info_x86.get("InternalName").cloned().unwrap_or_default();
+        version_info.company_name = strings_info_x86.get("CompanyName").cloned().unwrap_or_default();
+        version_info.file_version = strings_info_x86.get("FileVersion").cloned().unwrap_or_default();
+        version_info.product_name = strings_info_x86.get("ProductName").cloned().unwrap_or_default();
+      }
+    }
+
+    // Return the populated VersionInfo struct
+    return Ok(version_info);
+  }
+
+  pub fn get_process_icon(&self, process_id: u32) -> Option<gtk4::gdk::Paintable> {
+    let process;
+    let access = Access::Limited;
+
+    match self.open_process(process_id, access) {
+      Ok(v) => process = v,
+      Err(_) => return None,
+    }
+
+    match Self::get_process_hicon(process) {
+      Ok(v) => Self::hicon_to_paintable(v),
+      Err(_) => return None,
+    }
+  }
+
+  // Retrieves the first large icon from a process's executable
+  fn get_process_hicon(process: HANDLE) -> Result<winapi::shared::windef::HICON, Box<dyn std::error::Error>> {
+    // Buffer for executable path (supports long paths)
+    const BUF_SIZE: usize = 0x8000;
+    let mut filename: [u16; BUF_SIZE] = [0; BUF_SIZE];
+
+    // Get executable path
+    let len = unsafe { GetModuleFileNameExW(process, ptr::null_mut(), filename.as_mut_ptr(), BUF_SIZE as u32) };
+
+    if len == 0 {
+      return Err(std::io::Error::last_os_error().into());
+    }
+
+    // Extract first large icon
+    let mut large_icon: winapi::shared::windef::HICON = ptr::null_mut();
+    let count = unsafe {
+      ExtractIconExW(
+        filename.as_ptr(),
+        0, // First icon index
+        &mut large_icon,
+        ptr::null_mut(),
+        1, // Extract only one icon
+      )
+    };
+
+    match count {
+      // No icons found
+      0 => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No icons found in executable").into()),
+      // Success
+      _ if !large_icon.is_null() => Ok(large_icon),
+      // Extraction failed
+      _ => Err(std::io::Error::new(std::io::ErrorKind::Other, "Icon extraction failed").into()),
+    }
+  }
+
+  fn hicon_to_paintable(hicon: HICON) -> Option<gtk4::gdk::Paintable> {
+    unsafe {
+      // 1) Retrieve ICONINFO to get the HBITMAP for color
+      let mut icon_info: ICONINFO = zeroed();
+      if GetIconInfo(hicon, &mut icon_info) == 0 {
+        return None;
+      }
+      let hbitmap: HBITMAP = icon_info.hbmColor;
+
+      // 2) Prepare a BITMAPINFOHEADER to query dimensions/format
+      let mut bmp_info_header: BITMAPINFOHEADER = zeroed();
+      bmp_info_header.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+
+      let mut bmp_info: BITMAPINFO = zeroed();
+      bmp_info.bmiHeader = bmp_info_header;
+
+      // 3) Create a compatible DC (needed by GetDIBits)
+      let hdc = winapi::um::wingdi::CreateCompatibleDC(ptr::null_mut());
+      if hdc.is_null() {
+        DeleteObject(icon_info.hbmColor as _);
+        DeleteObject(icon_info.hbmMask as _);
+        return None;
+      }
+
+      // 4) First call to GetDIBits with nRows = 0 to fill in bmiHeader (width/height/etc.)
+      if GetDIBits(hdc, hbitmap, 0, 0, ptr::null_mut(), &mut bmp_info, DIB_RGB_COLORS) == 0 {
+        DeleteDC(hdc);
+        DeleteObject(icon_info.hbmColor as _);
+        DeleteObject(icon_info.hbmMask as _);
+        return None;
+      }
+
+      let width = bmp_info.bmiHeader.biWidth;
+      let raw_height = bmp_info.bmiHeader.biHeight;
+      let height = raw_height.abs();
+      // 5) Compute row_stride for a 32-bit image (DWORD-aligned)
+      let row_stride = ((width * 32 + 31) / 32) * 4;
+      let image_size = (row_stride * height) as usize;
+
+      // 6) Allocate a buffer for the pixel data
+      let mut pixels = vec![0u8; image_size];
+
+      // 7) Set negative height to request a top-down DIB
+      bmp_info.bmiHeader.biHeight = -(height as i32);
+
+      // 8) Second call to GetDIBits to actually fill our `pixels` buffer
+      if GetDIBits(hdc, hbitmap, 0, height as u32, pixels.as_mut_ptr() as *mut _, &mut bmp_info, DIB_RGB_COLORS) == 0 {
+        DeleteDC(hdc);
+        DeleteObject(icon_info.hbmColor as _);
+        DeleteObject(icon_info.hbmMask as _);
+        return None;
+      }
+
+      // 9) Clean up the DC and bitmaps
+      DeleteDC(hdc);
+      DeleteObject(icon_info.hbmColor as _);
+      DeleteObject(icon_info.hbmMask as _);
+
+      // 10) Swap B <-> R so that BGRA becomes RGBA
+      for chunk in pixels.chunks_exact_mut(4) {
+        chunk.swap(0, 2);
+      }
+
+      // 11) Build a Pixbuf from the raw RGBA data
+      let pixbuf = gtk4::gdk_pixbuf::Pixbuf::from_mut_slice(
+        pixels,
+        gtk4::gdk_pixbuf::Colorspace::Rgb,
+        true, // has alpha
+        8,    // bits per sample
+        width,
+        height,
+        row_stride as i32,
+      );
+
+      // 12) Convert Pixbuf → Texture → Paintable
+      Some(gtk4::gdk::Texture::for_pixbuf(&pixbuf).into())
+    }
+  }
+}
