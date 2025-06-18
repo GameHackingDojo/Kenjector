@@ -1,16 +1,22 @@
 use derive_more::Display;
 use pelite::{FileMap, pe32::{Pe as Pe32, PeFile as Pe32File}, pe64::{Pe as Pe64, PeFile as Pe64File}};
-use std::ffi::CString;
-use std::{ffi::CStr, mem::zeroed, path::PathBuf, ptr::{self, null_mut}};
+use std::{ffi::{CStr, CString}, path::PathBuf};
 use winapi::{shared::windef::{HBITMAP, HICON}, um::{handleapi::CloseHandle, libloaderapi::{GetModuleHandleA, GetProcAddress}, memoryapi::{VirtualAllocEx, WriteProcessMemory}, processthreadsapi::{CreateRemoteThread, GetExitCodeThread, OpenProcess, OpenProcessToken}, psapi::GetModuleFileNameExW, securitybaseapi::GetTokenInformation, shellapi::ExtractIconExW, synchapi::WaitForSingleObject, tlhelp32::{CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS}, winbase::INFINITE, wingdi::{BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDIBits}, winnt::{HANDLE, IMAGE_FILE_MACHINE_I386, MEM_COMMIT, PAGE_READWRITE, PROCESS_ALL_ACCESS, PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation}, winuser::{GetIconInfo, ICONINFO}, wow64apiset::IsWow64Process2}};
 
 #[derive(Debug, Clone, Display)]
 #[display("{} - {:#X}", name, process_id)]
-pub struct ProcessBasicInfo {
+pub struct ProcessInfo {
   pub icon: Option<gtk4::gdk::Paintable>,
   pub elevated: bool,
   pub name: String,
   pub arch: Arch,
+  pub process_id: u32,
+}
+
+#[derive(Debug, Clone, Display)]
+#[display("{} - {:#X}", name, process_id)]
+pub struct KenjectionInfo {
+  pub name: String,
   pub process_id: u32,
 }
 
@@ -37,18 +43,82 @@ pub enum Arch {
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
 pub enum Access {
-  All = PROCESS_ALL_ACCESS,
+  Full = PROCESS_ALL_ACCESS,
   Limited = PROCESS_QUERY_LIMITED_INFORMATION,
 }
 
 #[derive(Debug, Copy, Clone)]
 pub struct Kenjector {}
 impl Kenjector {
+  pub fn new() -> Self { return Self {} }
+
+  pub fn kennject(&self, kenjection_info: &KenjectionInfo, path: PathBuf) -> Result<String, String> {
+    let process_id = Self::get_pid(&kenjection_info.name).map_err(|e| format!("Failed to get PID: {}", e))?;
+    let dll_str = path.to_str().ok_or("Invalid DLL path")?;
+    let dll_cstring = CString::new(dll_str).map_err(|_| "CString conversion failed")?;
+    println!("DLL path being injected: {:?}", dll_cstring);
+
+    unsafe {
+      let access = Access::Full;
+
+      let h_process = self.open_process(access, process_id).unwrap();
+      if h_process.is_null() {
+        return Err(format!("OpenProcess failed, error: {:#X?}", std::io::Error::last_os_error()));
+      }
+
+      // println!("h_process = {:X?}, process_id = {}, kenjection_info.process_id = {}, kenjection_info.name = {}", h_process, process_id, kenjection_info.process_id, kenjection_info.name);
+
+      let alloc = VirtualAllocEx(h_process, std::ptr::null_mut(), dll_cstring.to_bytes_with_nul().len(), MEM_COMMIT, PAGE_READWRITE);
+
+      if alloc.is_null() {
+        CloseHandle(h_process);
+        return Err(format!("VirtualAllocEx failed, error: {:#X?}", std::io::Error::last_os_error()));
+      }
+
+      let wrote = WriteProcessMemory(h_process, alloc, dll_cstring.as_ptr() as _, dll_cstring.to_bytes_with_nul().len(), std::ptr::null_mut());
+
+      if wrote == 0 {
+        CloseHandle(h_process);
+        return Err(format!("WriteProcessMemory failed, error: {:#X?}", std::io::Error::last_os_error()));
+      }
+
+      let kernel32 = GetModuleHandleA(b"kernel32.dll\0".as_ptr() as _);
+      let load_library = GetProcAddress(kernel32, b"LoadLibraryA\0".as_ptr() as _);
+      if load_library.is_null() {
+        CloseHandle(h_process);
+        return Err(format!("GetProcAddress failed, error: {:#X?}", std::io::Error::last_os_error()));
+      }
+
+      let thread = CreateRemoteThread(h_process, std::ptr::null_mut(), 0, Some(std::mem::transmute(load_library)), alloc, 0, std::ptr::null_mut());
+
+      if thread.is_null() {
+        CloseHandle(h_process);
+        return Err(format!("CreateRemoteThread failed, error: {:#X?}", std::io::Error::last_os_error()));
+      }
+
+      WaitForSingleObject(thread, INFINITE);
+
+      let mut remote_result: u32 = 0;
+      let got = GetExitCodeThread(thread, &mut remote_result);
+
+      CloseHandle(thread);
+      CloseHandle(h_process);
+
+      if got == 0 {
+        Ok(format!("GetExitCodeThread failed."))
+      } else if remote_result == 0 {
+        Ok(format!("LoadLibraryA failed — did not load DLL."))
+      } else {
+        Ok(format!("DLL Kenjected successfully at 0x{:X}", remote_result))
+      }
+    }
+  }
+
   fn get_pid(name: &str) -> Result<u32, String> {
     unsafe {
       let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-      if snapshot == null_mut() {
-        return Err("CreateToolhelp32Snapshot failed".to_string());
+      if snapshot == std::ptr::null_mut() {
+        return Err(format!("CreateToolhelp32Snapshot failed, error: {:#X?}", std::io::Error::last_os_error()));
       }
 
       let mut entry: PROCESSENTRY32 = std::mem::zeroed();
@@ -56,7 +126,7 @@ impl Kenjector {
 
       if Process32First(snapshot, &mut entry) == 0 {
         CloseHandle(snapshot);
-        return Err("Process32First failed".to_string());
+        return Err(format!("Process32First failed, error: {:#X?}", std::io::Error::last_os_error()));
       }
 
       loop {
@@ -78,82 +148,20 @@ impl Kenjector {
     }
   }
 
-  pub fn inject(&self, process_id: u32, path: PathBuf) -> Result<String, String> {
-    // let process_id = get_pid(process_name).map_err(|e| format!("Failed to get PID: {}", e))?;
-    let dll_str = path.to_str().ok_or("Invalid DLL path")?;
-    let dll_cstring = CString::new(dll_str).map_err(|_| "CString conversion failed")?;
-    println!("DLL path being injected: {:?}", dll_cstring);
-
-    unsafe {
-      let h_process = OpenProcess(PROCESS_ALL_ACCESS, 0, process_id);
-      if h_process.is_null() {
-        return Err("OpenProcess failed".to_string());
-      }
-
-      let alloc = VirtualAllocEx(h_process, null_mut(), dll_cstring.to_bytes_with_nul().len(), MEM_COMMIT, PAGE_READWRITE);
-
-      if alloc.is_null() {
-        CloseHandle(h_process);
-        return Err("VirtualAllocEx failed".to_string());
-      }
-
-      let wrote = WriteProcessMemory(h_process, alloc, dll_cstring.as_ptr() as _, dll_cstring.to_bytes_with_nul().len(), null_mut());
-
-      if wrote == 0 {
-        CloseHandle(h_process);
-        return Err("WriteProcessMemory failed".to_string());
-      }
-
-      let kernel32 = GetModuleHandleA(b"kernel32.dll\0".as_ptr() as _);
-      let load_library = GetProcAddress(kernel32, b"LoadLibraryA\0".as_ptr() as _);
-      if load_library.is_null() {
-        CloseHandle(h_process);
-        return Err("GetProcAddress failed".to_string());
-      }
-
-      let thread = CreateRemoteThread(h_process, null_mut(), 0, Some(std::mem::transmute(load_library)), alloc, 0, null_mut());
-
-      if thread.is_null() {
-        CloseHandle(h_process);
-        return Err("CreateRemoteThread failed".to_string());
-      }
-
-      WaitForSingleObject(thread, INFINITE);
-
-      let mut remote_result: u32 = 0;
-      let got = GetExitCodeThread(thread, &mut remote_result);
-
-      CloseHandle(thread);
-      CloseHandle(h_process);
-
-      if got == 0 {
-        Ok(format!("GetExitCodeThread failed."))
-      } else if remote_result == 0 {
-        Ok(format!("LoadLibraryA failed — did not load DLL."))
-      } else {
-        Ok(format!("DLL Kenjected successfully at 0x{:X}", remote_result))
-      }
-    }
-  }
-
-  pub fn new() -> Self { return Self {} }
-
-  pub fn open_process(&self, process_id: u32, access: Access) -> Result<HANDLE, Box<dyn std::error::Error>> {
+  pub fn open_process(&self, access: Access, process_id: u32) -> Result<HANDLE, Box<dyn std::error::Error>> {
     let handle = unsafe { OpenProcess(access as u32, 0, process_id) };
 
-    if !handle.is_null() { Ok(handle) } else { Err(format!("Failed to retrieve handle of the process, process_id {}", process_id).into()) }
+    if !handle.is_null() { Ok(handle) } else { Err(format!("Failed to retrieve handle of the process, process_id {}, error: {:#X?}", process_id, std::io::Error::last_os_error()).into()) }
   }
 
-  // Modify get_processes to return Vec<ProcessInfo>
-
-  pub fn get_processes(&self) -> Vec<ProcessBasicInfo> {
-    let mut processes: Vec<ProcessBasicInfo> = Vec::new();
+  pub fn get_processes(&self) -> Vec<ProcessInfo> {
+    let mut processes: Vec<ProcessInfo> = Vec::new();
 
     unsafe {
       // Create snapshot of all processes
       let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
       if snapshot.is_null() {
-        eprintln!("Error creating process snapshot");
+        eprintln!("Error creating process snapshot, error: {:#X?}", std::io::Error::last_os_error());
         return processes;
       }
 
@@ -162,7 +170,7 @@ impl Kenjector {
 
       // Get first process
       if Process32First(snapshot, &mut process_entry) == 0 {
-        eprintln!("Error getting first process");
+        eprintln!("Error getting first process, error: {:#X?}", std::io::Error::last_os_error());
         return processes;
       }
 
@@ -172,7 +180,7 @@ impl Kenjector {
         let mut arch = Arch::Unknown;
         let mut elevated = true;
 
-        let process = self.open_process(process_id, access);
+        let process = self.open_process(access, process_id);
 
         if process.is_ok() {
           let process = process.unwrap();
@@ -189,7 +197,7 @@ impl Kenjector {
 
         let name = CStr::from_ptr(process_entry.szExeFile.as_ptr()).to_string_lossy().into_owned();
 
-        processes.push(ProcessBasicInfo { icon: self.get_process_icon(process_id), elevated, name, arch, process_id });
+        processes.push(ProcessInfo { icon: self.get_process_icon(process_id), elevated, name, arch, process_id });
 
         // Get next process
         if Process32Next(snapshot, &mut process_entry) == 0 {
@@ -206,7 +214,7 @@ impl Kenjector {
 
   pub fn is_elevated(&self, process: HANDLE) -> Result<bool, Box<dyn std::error::Error>> {
     unsafe {
-      let mut token: HANDLE = null_mut();
+      let mut token = std::ptr::null_mut();
 
       if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
         return Err("Failed to open process token".into());
@@ -331,9 +339,9 @@ impl Kenjector {
 
   pub fn get_process_icon(&self, process_id: u32) -> Option<gtk4::gdk::Paintable> {
     let process;
-    let access = Access::Limited;
+    let access = Access::Full;
 
-    match self.open_process(process_id, access) {
+    match self.open_process(access, process_id) {
       Ok(v) => process = v,
       Err(_) => return None,
     }
@@ -351,20 +359,20 @@ impl Kenjector {
     let mut filename: [u16; BUF_SIZE] = [0; BUF_SIZE];
 
     // Get executable path
-    let len = unsafe { GetModuleFileNameExW(process, ptr::null_mut(), filename.as_mut_ptr(), BUF_SIZE as u32) };
+    let len = unsafe { GetModuleFileNameExW(process, std::ptr::null_mut(), filename.as_mut_ptr(), BUF_SIZE as u32) };
 
     if len == 0 {
       return Err(std::io::Error::last_os_error().into());
     }
 
     // Extract first large icon
-    let mut large_icon: winapi::shared::windef::HICON = ptr::null_mut();
+    let mut large_icon: winapi::shared::windef::HICON = std::ptr::null_mut();
     let count = unsafe {
       ExtractIconExW(
         filename.as_ptr(),
         0, // First icon index
         &mut large_icon,
-        ptr::null_mut(),
+        std::ptr::null_mut(),
         1, // Extract only one icon
       )
     };
@@ -382,21 +390,21 @@ impl Kenjector {
   fn hicon_to_paintable(hicon: HICON) -> Option<gtk4::gdk::Paintable> {
     unsafe {
       // 1) Retrieve ICONINFO to get the HBITMAP for color
-      let mut icon_info: ICONINFO = zeroed();
+      let mut icon_info: ICONINFO = std::mem::zeroed();
       if GetIconInfo(hicon, &mut icon_info) == 0 {
         return None;
       }
       let hbitmap: HBITMAP = icon_info.hbmColor;
 
       // 2) Prepare a BITMAPINFOHEADER to query dimensions/format
-      let mut bmp_info_header: BITMAPINFOHEADER = zeroed();
+      let mut bmp_info_header: BITMAPINFOHEADER = std::mem::zeroed();
       bmp_info_header.biSize = size_of::<BITMAPINFOHEADER>() as u32;
 
-      let mut bmp_info: BITMAPINFO = zeroed();
+      let mut bmp_info: BITMAPINFO = std::mem::zeroed();
       bmp_info.bmiHeader = bmp_info_header;
 
       // 3) Create a compatible DC (needed by GetDIBits)
-      let hdc = winapi::um::wingdi::CreateCompatibleDC(ptr::null_mut());
+      let hdc = winapi::um::wingdi::CreateCompatibleDC(std::ptr::null_mut());
       if hdc.is_null() {
         DeleteObject(icon_info.hbmColor as _);
         DeleteObject(icon_info.hbmMask as _);
@@ -404,7 +412,7 @@ impl Kenjector {
       }
 
       // 4) First call to GetDIBits with nRows = 0 to fill in bmiHeader (width/height/etc.)
-      if GetDIBits(hdc, hbitmap, 0, 0, ptr::null_mut(), &mut bmp_info, DIB_RGB_COLORS) == 0 {
+      if GetDIBits(hdc, hbitmap, 0, 0, std::ptr::null_mut(), &mut bmp_info, DIB_RGB_COLORS) == 0 {
         DeleteDC(hdc);
         DeleteObject(icon_info.hbmColor as _);
         DeleteObject(icon_info.hbmMask as _);

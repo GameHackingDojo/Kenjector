@@ -1,5 +1,5 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use crate::{logic::kenjector::{Access, Kenjector, ProcessBasicInfo}, ui::{listview::{GenericListView, ListRow}, messagebox::message_box}};
+// #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+use crate::{logic::kenjector::{Access, KenjectionInfo, Kenjector, ProcessInfo}, ui::{listview::{GenericListView, ListRow}, messagebox::message_box}};
 use gtk4::prelude::*;
 use parking_lot::RwLock;
 use std::{path::PathBuf, sync::Arc};
@@ -42,7 +42,7 @@ impl<T: IsA<gtk4::Widget>> MarginAll for T {
   }
 }
 
-impl ListRow for ProcessBasicInfo {
+impl ListRow for ProcessInfo {
   fn column_types() -> &'static [gtk4::glib::Type] { &[gtk4::glib::Type::OBJECT, gtk4::glib::Type::STRING, gtk4::glib::Type::STRING, gtk4::glib::Type::STRING, gtk4::glib::Type::U64, gtk4::glib::Type::STRING] }
   fn fill_row(store: &gtk4::ListStore, p: &Self) {
     let icon: Option<gtk4::gdk::Paintable> = p.icon.clone();
@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let kenjector = Kenjector::new();
 
-    let mut listview = GenericListView::<ProcessBasicInfo>::new();
+    let mut listview = GenericListView::<ProcessInfo>::new();
     let alignment = gtk4::pango::Alignment::Left;
     listview
       .add_icon_column("Icon", 0, Some(40))
@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       .add_text_column("ID", 4, None, alignment)
       .add_text_column("0xID", 5, None, alignment)
       .enable_sorting(4, gtk4::SortType::Ascending)
-      .set_row_mapper(ProcessBasicInfo::fill_row);
+      .set_row_mapper(ProcessInfo::fill_row);
 
     let proc_info_vec = kenjector.get_processes();
 
@@ -160,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window_c = window.clone();
 
     let inject_btn = gtk4::Button::with_label("Kenject");
-    inject_btn.connect_clicked(move |button| {
+    inject_btn.connect_clicked(move |_| {
       let selected_iters = listview_c.get_selected();
       let mut process_id = u64::MAX;
       let mut process_name = String::new();
@@ -176,6 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       }
 
       let process_id = process_id as u32;
+      let kenjection_info = KenjectionInfo { name: process_name.clone(), process_id };
       let path = PathBuf::from(input_c.text());
 
       // Verify the file is a valid PE DLL
@@ -194,7 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       if path_valid {
         if !kenjector.is_elevated(unsafe { GetCurrentProcess() }).unwrap() {
           let access = Access::Limited;
-          match kenjector.open_process(process_id, access) {
+          match kenjector.open_process(access, process_id) {
             Ok(process_handle) => {
               if let Ok(true) = kenjector.is_elevated(process_handle) {
                 return;
@@ -207,7 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
           };
         }
 
-        match kenjector.inject(process_id, path.clone()) {
+        match kenjector.kennject(&kenjection_info, path.clone()) {
           Ok(v) => message_box(&window_c, "Kenjection complete", &format!("Kenjected into {}\n{}", process_name, v), None),
           Err(e) => message_box(&window_c, "Kenjection failed", &format!("Failed to Kennject into {}\n{}", process_name, e), None),
         }
