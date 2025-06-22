@@ -1,4 +1,4 @@
-// #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use crate::{logic::kenjector::{Access, KenjectionInfo, Kenjector, ProcessInfo}, ui::{listview::{GenericListView, ListRow}, messagebox::message_box}};
 use gtk4::prelude::*;
 use parking_lot::RwLock;
