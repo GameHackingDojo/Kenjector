@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add CSS
     let provider = gtk4::CssProvider::new();
-    let css_bytes: &[u8] = include_bytes!("ui/gtk.css");
+    let css_bytes = include_bytes!("ui/gtk.css");
     let css_gbytes = gtk4::glib::Bytes::from(&css_bytes[..]);
     provider.load_from_bytes(&css_gbytes);
 
@@ -194,8 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
       if path_valid {
         if !kenjector.is_elevated(unsafe { GetCurrentProcess() }).unwrap() {
-          let access = Access::Limited;
-          match kenjector.open_process(access, process_id) {
+          match kenjector.open_process(Access::Limited, process_id) {
             Ok(process_handle) => {
               if let Ok(true) = kenjector.is_elevated(process_handle) {
                 return;

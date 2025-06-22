@@ -59,9 +59,7 @@ impl Kenjector {
     println!("DLL path being injected: {:?}", dll_cstring);
 
     unsafe {
-      let access = Access::Full;
-
-      let h_process = self.open_process(access, process_id).unwrap();
+      let h_process = self.open_process(Access::Full, process_id).unwrap();
       if h_process.is_null() {
         return Err(format!("OpenProcess failed, error: {:#X?}", std::io::Error::last_os_error()));
       }
@@ -150,7 +148,6 @@ impl Kenjector {
 
   pub fn open_process(&self, access: Access, process_id: u32) -> Result<HANDLE, Box<dyn std::error::Error>> {
     let handle = unsafe { OpenProcess(access as u32, 0, process_id) };
-
     if !handle.is_null() { Ok(handle) } else { Err(format!("Failed to retrieve handle of the process, process_id {}, error: {:#X?}", process_id, std::io::Error::last_os_error()).into()) }
   }
 
@@ -176,11 +173,10 @@ impl Kenjector {
 
       loop {
         let process_id = process_entry.th32ProcessID;
-        let access = Access::Limited;
         let mut arch = Arch::Unknown;
         let mut elevated = true;
 
-        let process = self.open_process(access, process_id);
+        let process = self.open_process(Access::Limited, process_id);
 
         if process.is_ok() {
           let process = process.unwrap();
@@ -339,9 +335,8 @@ impl Kenjector {
 
   pub fn get_process_icon(&self, process_id: u32) -> Option<gtk4::gdk::Paintable> {
     let process;
-    let access = Access::Full;
 
-    match self.open_process(access, process_id) {
+    match self.open_process(Access::Full, process_id) {
       Ok(v) => process = v,
       Err(_) => return None,
     }
