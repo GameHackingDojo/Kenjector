@@ -38,6 +38,9 @@ winapi = { version = "0.3.9", features = [
   "wow64apiset",
 ] }
 
+[target.'cfg(windows)'.dependencies]
+gdk4-win32 = "0.9.5"
+
 
 [build-dependencies]
 winres = "0.1.12"

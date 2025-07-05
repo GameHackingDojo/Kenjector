@@ -1,4 +1,5 @@
 use derive_more::Display;
+use gtk4::{gdk::prelude::DisplayExt, prelude::NativeExt};
 use pelite::{FileMap, pe32::{Pe as Pe32, PeFile as Pe32File}, pe64::{Pe as Pe64, PeFile as Pe64File}};
 use std::{ffi::{CStr, CString}, path::PathBuf};
 use winapi::{shared::windef::{HBITMAP, HICON}, um::{handleapi::CloseHandle, libloaderapi::{GetModuleHandleA, GetProcAddress}, memoryapi::{VirtualAllocEx, WriteProcessMemory}, processthreadsapi::{CreateRemoteThread, GetExitCodeThread, OpenProcess, OpenProcessToken}, psapi::GetModuleFileNameExW, securitybaseapi::GetTokenInformation, shellapi::ExtractIconExW, synchapi::WaitForSingleObject, tlhelp32::{CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS}, winbase::INFINITE, wingdi::{BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDIBits}, winnt::{HANDLE, IMAGE_FILE_MACHINE_I386, MEM_COMMIT, PAGE_READWRITE, PROCESS_ALL_ACCESS, PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation}, winuser::{GetIconInfo, ICONINFO}, wow64apiset::IsWow64Process2}};
@@ -50,16 +51,14 @@ pub enum Access {
 #[derive(Debug, Copy, Clone)]
 pub struct Kenjector {}
 impl Kenjector {
-  pub fn new() -> Self { return Self {} }
-
-  pub fn kennject(&self, kenjection_info: &KenjectionInfo, path: PathBuf) -> Result<String, String> {
+  pub fn kennject(kenjection_info: &KenjectionInfo, path: PathBuf) -> Result<String, String> {
     let process_id = Self::get_pid(&kenjection_info.name).map_err(|e| format!("Failed to get PID: {}", e))?;
     let dll_str = path.to_str().ok_or("Invalid DLL path")?;
     let dll_cstring = CString::new(dll_str).map_err(|_| "CString conversion failed")?;
     println!("DLL path being injected: {:?}", dll_cstring);
 
     unsafe {
-      let h_process = self.open_process(Access::Full, process_id).unwrap();
+      let h_process = Self::open_process(Access::Full, process_id).unwrap();
       if h_process.is_null() {
         return Err(format!("OpenProcess failed, error: {:#X?}", std::io::Error::last_os_error()));
       }
@@ -146,12 +145,12 @@ impl Kenjector {
     }
   }
 
-  pub fn open_process(&self, access: Access, process_id: u32) -> Result<HANDLE, Box<dyn std::error::Error>> {
+  pub fn open_process(access: Access, process_id: u32) -> Result<HANDLE, Box<dyn std::error::Error>> {
     let handle = unsafe { OpenProcess(access as u32, 0, process_id) };
     if !handle.is_null() { Ok(handle) } else { Err(format!("Failed to retrieve handle of the process, process_id {}, error: {:#X?}", process_id, std::io::Error::last_os_error()).into()) }
   }
 
-  pub fn get_processes(&self) -> Vec<ProcessInfo> {
+  pub fn get_processes() -> Vec<ProcessInfo> {
     let mut processes: Vec<ProcessInfo> = Vec::new();
 
     unsafe {
@@ -176,16 +175,16 @@ impl Kenjector {
         let mut arch = Arch::Unknown;
         let mut elevated = true;
 
-        let process = self.open_process(Access::Limited, process_id);
+        let process = Self::open_process(Access::Limited, process_id);
 
         if process.is_ok() {
           let process = process.unwrap();
-          elevated = match self.is_elevated(process) {
+          elevated = match Self::is_elevated(process) {
             Ok(v) => v,
             Err(_) => true,
           };
 
-          arch = match self.architecture(process) {
+          arch = match Self::architecture(process) {
             Ok(v) => v,
             Err(_) => Arch::Unknown,
           };
@@ -193,7 +192,7 @@ impl Kenjector {
 
         let name = CStr::from_ptr(process_entry.szExeFile.as_ptr()).to_string_lossy().into_owned();
 
-        processes.push(ProcessInfo { icon: self.get_process_icon(process_id), elevated, name, arch, process_id });
+        processes.push(ProcessInfo { icon: Self::get_process_icon(process_id), elevated, name, arch, process_id });
 
         // Get next process
         if Process32Next(snapshot, &mut process_entry) == 0 {
@@ -208,7 +207,7 @@ impl Kenjector {
     processes
   }
 
-  pub fn is_elevated(&self, process: HANDLE) -> Result<bool, Box<dyn std::error::Error>> {
+  pub fn is_elevated(process: HANDLE) -> Result<bool, Box<dyn std::error::Error>> {
     unsafe {
       let mut token = std::ptr::null_mut();
 
@@ -231,7 +230,7 @@ impl Kenjector {
     }
   }
 
-  pub fn architecture(&self, process: HANDLE) -> Result<Arch, Box<dyn std::error::Error>> {
+  pub fn architecture(process: HANDLE) -> Result<Arch, Box<dyn std::error::Error>> {
     let mut process_machine = 0;
     let mut native_machine = 0;
 
@@ -250,7 +249,7 @@ impl Kenjector {
     }
   }
 
-  pub fn is_pe_dll(&self, path: &PathBuf) -> Result<bool, Box<dyn std::error::Error>> {
+  pub fn is_pe_dll(path: &PathBuf) -> Result<bool, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let pe = goblin::pe::PE::parse(&bytes)?;
     Ok(pe.header.coff_header.characteristics & goblin::pe::characteristic::IMAGE_FILE_DLL != 0)
@@ -282,7 +281,7 @@ impl Kenjector {
   //   Ok(version_info)
   // }
 
-  fn get_pe_version_info(&self, path: PathBuf) -> Result<VersionInfo, String> {
+  fn get_pe_version_info(path: PathBuf) -> Result<VersionInfo, String> {
     // Load the file into memory
     let file_map = FileMap::open(&path).expect(format!("Failed to open file map from {:?}", path).as_str());
 
@@ -333,10 +332,10 @@ impl Kenjector {
     return Ok(version_info);
   }
 
-  pub fn get_process_icon(&self, process_id: u32) -> Option<gtk4::gdk::Paintable> {
+  pub fn get_process_icon(process_id: u32) -> Option<gtk4::gdk::Paintable> {
     let process;
 
-    match self.open_process(Access::Full, process_id) {
+    match Self::open_process(Access::Full, process_id) {
       Ok(v) => process = v,
       Err(_) => return None,
     }
@@ -459,5 +458,81 @@ impl Kenjector {
       // 12) Convert Pixbuf → Texture → Paintable
       Some(gtk4::gdk::Texture::for_pixbuf(&pixbuf).into())
     }
+  }
+}
+
+pub struct GtkHelper {}
+impl GtkHelper {
+  // pub fn img_from_bytes( bytes: &[u8]) -> Result<gtk4::Image, gtk4::glib::Error> {
+  //   let loader = gtk4::gdk_pixbuf::PixbufLoader::new();
+  //   loader.write(bytes)?;
+  //   loader.close()?;
+  //   let pixbuf = loader.pixbuf().ok_or_else(|| gtk4::glib::Error::new(gtk4::gdk_pixbuf::PixbufError::Failed, "Failed to get pixbuf"))?;
+  //   Ok(gtk4::Image::from_pixbuf(Some(&pixbuf)))
+  // }
+
+  pub fn monitor_info(window: &gtk4::ApplicationWindow) -> Result<gtk4::gdk::Monitor, Box<dyn std::error::Error>> {
+    let display = gtk4::prelude::WidgetExt::display(window);
+    // println!("Display name: {}", display.name());
+
+    // If you need the monitor (screen) information
+    if let Some(monitor) = display.monitor_at_surface(&window.surface().unwrap()) {
+      Ok(monitor)
+      // println!("Monitor geometry: {:?}", monitor.geometry());
+      // println!("Monitor scale factor: {}", monitor.scale_factor());
+      // println!("Monitor refresh rate: {}", monitor.refresh_rate());
+    } else {
+      Err("Failed to get monitor info".into())
+    }
+  }
+
+  #[cfg(target_os = "windows")]
+  pub fn get_window_dimensions(hwnd: winapi::shared::windef::HWND) -> Option<(i32, i32)> {
+    let mut rect = winapi::shared::windef::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+
+    unsafe { if winapi::um::winuser::GetWindowRect(hwnd, &mut rect) != 0 { Some((rect.right - rect.left, rect.bottom - rect.top)) } else { None } }
+  }
+
+  #[cfg(target_os = "windows")]
+  fn get_hwnd(window: &gtk4::ApplicationWindow) -> Option<*mut winapi::shared::windef::HWND__> {
+    // Get the GDK surface
+
+    use gtk4::{glib::object::{Cast, ObjectExt}, prelude::NativeExt};
+    let surface = window.surface()?;
+
+    // Check if this is a Win32 surface (Windows platform)
+    if !surface.is::<gdk4_win32::Win32Surface>() {
+      return None;
+    }
+
+    // Downcast to Win32Surface
+    let win32_surface = surface.downcast::<gdk4_win32::Win32Surface>().ok()?;
+
+    // Conversion from gdk4_win32::HWND to *mut HWND__
+    let hwnd_isize = win32_surface.handle().0;
+    Some(hwnd_isize as *mut _)
+  }
+
+  #[cfg(target_os = "windows")]
+  pub fn centre_to_screen(window: &gtk4::ApplicationWindow) -> Result<(), Box<dyn std::error::Error>> {
+    use gtk4::gdk::prelude::MonitorExt;
+
+    let monitor = Self::monitor_info(window)?;
+    let monitor_w = monitor.geometry().width();
+    let monitor_h = monitor.geometry().height();
+    let scale = monitor.scale();
+
+    if let Some(hwnd) = Self::get_hwnd(window) {
+      unsafe {
+        if let Some(win_dim) = Self::get_window_dimensions(hwnd) {
+          let new_x = ((monitor_w - win_dim.0) as f64 / 2.0 * scale) as i32;
+          let new_y = ((monitor_h - win_dim.1) as f64 / 2.0 * scale) as i32;
+
+          winapi::um::winuser::SetWindowPos(hwnd, winapi::um::winuser::HWND_TOP, new_x, new_y, 0, 0, winapi::um::winuser::SWP_NOSIZE);
+        }
+      };
+    }
+
+    Ok(())
   }
 }

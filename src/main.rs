@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use crate::{logic::kenjector::{Access, KenjectionInfo, Kenjector, ProcessInfo}, ui::{listview::{GenericListView, ListRow}, messagebox::message_box}};
+use crate::{logic::kenjector::{Access, GtkHelper, KenjectionInfo, Kenjector, ProcessInfo}, ui::{listview::{GenericListView, ListRow}, messagebox::message_box}};
 use gtk4::prelude::*;
 use parking_lot::RwLock;
 use std::{path::PathBuf, sync::Arc};
@@ -81,8 +81,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     grid.set_margin_all(consts.margin);
     window.set_child(Some(&grid));
 
-    let kenjector = Kenjector::new();
-
     let mut listview = GenericListView::<ProcessInfo>::new();
     let alignment = gtk4::pango::Alignment::Left;
     listview
@@ -95,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       .enable_sorting(4, gtk4::SortType::Ascending)
       .set_row_mapper(ProcessInfo::fill_row);
 
-    let proc_info_vec = kenjector.get_processes();
+    let proc_info_vec = Kenjector::get_processes();
 
     listview.set_items(&proc_info_vec);
 
@@ -118,12 +116,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       let input_c_c = input_c.clone();
       let window_c_c = window_c.clone();
       dialog.connect_response(move |dialog, resp| {
-        let kenjector = Kenjector::new();
-
         if resp == gtk4::ResponseType::Accept {
           if let Some(file) = dialog.file() {
             if let Some(path) = file.path() {
-              match kenjector.is_pe_dll(&path) {
+              match Kenjector::is_pe_dll(&path) {
                 Ok(v) => {
                   if v {
                     input_c_c.set_text(path.to_str().unwrap_or_default());
@@ -147,10 +143,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let refresh_btn = gtk4::Button::with_label("Refresh");
     {
-      let kenjector_c = kenjector.clone();
       let listview_c = listview.clone();
       refresh_btn.connect_clicked(move |_| {
-        let proc_info_vec = kenjector_c.get_processes();
+        let proc_info_vec = Kenjector::get_processes();
         listview_c.set_items(&proc_info_vec);
       });
     }
@@ -180,7 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       let path = PathBuf::from(input_c.text());
 
       // Verify the file is a valid PE DLL
-      let path_valid = match kenjector.is_pe_dll(&path) {
+      let path_valid = match Kenjector::is_pe_dll(&path) {
         Ok(true) => true,
         Ok(false) => {
           message_box(&window_c, "Failed", "The chosen file is not a DLL", None);
@@ -193,10 +188,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
       };
 
       if path_valid {
-        if !kenjector.is_elevated(unsafe { GetCurrentProcess() }).unwrap() {
-          match kenjector.open_process(Access::Limited, process_id) {
+        if !Kenjector::is_elevated(unsafe { GetCurrentProcess() }).unwrap() {
+          match Kenjector::open_process(Access::Limited, process_id) {
             Ok(process_handle) => {
-              if let Ok(true) = kenjector.is_elevated(process_handle) {
+              if let Ok(true) = Kenjector::is_elevated(process_handle) {
                 return;
               }
             }
@@ -207,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
           };
         }
 
-        match kenjector.kennject(&kenjection_info, path.clone()) {
+        match Kenjector::kennject(&kenjection_info, path.clone()) {
           Ok(v) => message_box(&window_c, "Kenjection complete", &format!("Kenjected into {}\n{}", process_name, v), None),
           Err(e) => message_box(&window_c, "Kenjection failed", &format!("Failed to Kennject into {}\n{}", process_name, e), None),
         }
@@ -218,6 +213,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     grid.attach(&refresh_btn, 1, 3, 1, 1);
 
     window.present();
+
+    #[cfg(target_os = "windows")]
+    GtkHelper::centre_to_screen(&window).unwrap();
   });
 
   application.run();
