@@ -518,6 +518,8 @@ impl GtkHelper {
     use gtk4::gdk::prelude::MonitorExt;
 
     let monitor = Self::monitor_info(window)?;
+    let monitor_x = monitor.geometry().x();
+    let monitor_y = monitor.geometry().y();
     let monitor_w = monitor.geometry().width();
     let monitor_h = monitor.geometry().height();
     let scale = monitor.scale();
@@ -525,8 +527,8 @@ impl GtkHelper {
     if let Some(hwnd) = Self::get_hwnd(window) {
       unsafe {
         if let Some(win_dim) = Self::get_window_dimensions(hwnd) {
-          let new_x = ((monitor_w - win_dim.0) as f64 / 2.0 * scale) as i32;
-          let new_y = ((monitor_h - win_dim.1) as f64 / 2.0 * scale) as i32;
+          let new_x = monitor_x + ((monitor_w - win_dim.0) as f64 / 2.0 * scale) as i32;
+          let new_y = monitor_y + ((monitor_h - win_dim.1) as f64 / 2.0 * scale) as i32;
 
           winapi::um::winuser::SetWindowPos(hwnd, winapi::um::winuser::HWND_TOP, new_x, new_y, 0, 0, winapi::um::winuser::SWP_NOSIZE);
         }
